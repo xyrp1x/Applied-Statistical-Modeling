@@ -1,0 +1,69 @@
+# ===== Wine Quality Red Project =====
+# Data: UCI Wine Quality Red. Goal: concise end-to-end stats workflow.
+
+
+if (!require(pacman)) install.packages("pacman")
+pacman::p_load(tidyverse, readr, janitor, car, effectsize, lmtest, sandwich)
+
+set.seed(42); theme_set(theme_minimal(base_size = 12))
+
+url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-red.csv"
+df  <- read_delim(url, delim = ";", show_col_types = FALSE) |> clean_names()
+stopifnot(all(colSums(is.na(df)) == 0))           # no NAs in this dataset
+
+# Simple bands for group summaries / ANOVA
+qs <- quantile(df$quality, c(.33, .66))
+df <- df |>
+  mutate(quality_band = cut(quality, breaks = c(-Inf, qs[1], qs[2], Inf),
+                            labels = c("low","mid","high")),
+         high_quality = ifelse(quality >= 7, "high","not_high"))
+
+eda_tbl <- df |>
+  group_by(quality_band) |>
+  summarise(n = n(),
+            mean_alcohol = mean(alcohol), sd_alcohol = sd(alcohol),
+            mean_va = mean(volatile_acidity), sd_va = sd(volatile_acidity))
+print(eda_tbl)
+
+ggplot(df, aes(quality)) + geom_histogram(binwidth = 1, fill = "#4C78A8") +
+  labs(title = "Quality distribution")
+ggplot(df, aes(alcohol, fill = quality_band)) + geom_density(alpha = .45) +
+  labs(title = "Alcohol by quality band") + scale_fill_brewer(palette = "Set2")
+
+cat("\nPearson correlations with quality:\n")
+print(c(alcohol = cor(df$alcohol, df$quality),
+        volatile_acidity = cor(df$volatile_acidity, df$quality)))
+print(cor.test(df$alcohol, df$quality))           # expect +r
+print(cor.test(df$volatile_acidity, df$quality))  # expect -r
+
+tt <- t.test(alcohol ~ high_quality, data = df, var.equal = FALSE); print(tt)
+print(effectsize::hedges_g(alcohol ~ high_quality, data = df, ci = 0.95))
+
+
+print(car::leveneTest(citric_acid ~ quality_band, data = df))
+aov1 <- aov(citric_acid ~ quality_band, data = df); print(summary(aov1))
+print(effectsize::eta_squared(aov1, partial = FALSE))
+# Residual plots (visual assumptions)
+par(mfrow = c(1,2)); plot(aov1, which = 1); plot(aov1, which = 2); par(mfrow = c(1,1))
+# Tukey only if ANOVA significant
+if (summary(aov1)[[1]][["Pr(>F)"]][1] < .05) print(TukeyHSD(aov1))
+
+train <- df %>% group_by(quality_band) %>% sample_frac(0.8)
+test  <- anti_join(df, train, by = colnames(df))
+
+form <- quality ~ alcohol + volatile_acidity + sulphates + citric_acid +
+  residual_sugar + chlorides + density + total_sulfur_dioxide
+
+fit <- lm(form, data = train); print(summary(fit))         # coefficients & adj R^2
+
+print(lmtest::bptest(fit))                                 # Breusch–Pagan
+print(car::vif(fit))                                       # VIFs
+print(lmtest::coeftest(fit, vcov = sandwich::vcovHC(fit, type = "HC3")))  # robust
+
+pred <- predict(fit, newdata = test)
+rmse <- sqrt(mean((test$quality - pred)^2))
+mae  <- mean(abs(test$quality - pred))
+r2   <- 1 - sum((test$quality - pred)^2)/sum((test$quality - mean(test$quality))^2)
+cat(sprintf("\nTest metrics: RMSE=%.3f  MAE=%.3f  R2=%.3f\n", rmse, mae, r2))
+
+
